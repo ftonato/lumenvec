@@ -343,7 +343,7 @@ docker push brunomarques007/lumenvec:latest
 Publication checklist:
 1. review the final public Docker image name
 2. confirm `LICENSE` matches the intended project license
-3. tag the initial release as `v0.1.0`
+3. tag the release as `v0.1.1`
 
 ## Development
 
@@ -411,4 +411,4 @@ Current architectural direction:
 - `SECURITY.md`: lightweight disclosure and hardening guidance
 - `Makefile`: shortcuts for build, test, benchmarks, and Docker
 - `VERSION`: current release version
-- `RELEASE.md`: initial release notes
+- `RELEASE.md`: release notes
