@@ -29,3 +29,10 @@ Initial public release of LumenVec.
 git tag -a v0.1.0 -m "LumenVec v0.1.0"
 ```
 
+## Post-release updates
+
+### Coverage and CI hardening
+- Added package-local unit tests across production packages
+- Enforced a `90%` minimum coverage threshold for production packages
+- Added `go run ./tools/checkcoverage` for local and CI coverage verification
+- Updated CI, README, CONTRIBUTING, and Makefile to reflect the new coverage policy

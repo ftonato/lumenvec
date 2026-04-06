@@ -25,6 +25,7 @@ Run:
 ```bash
 go test ./...
 go vet ./...
+go run ./tools/checkcoverage
 ```
 
 If you change core search or ingest behavior, also run:
@@ -33,9 +34,20 @@ If you change core search or ingest behavior, also run:
 go test ./internal/core -bench . -benchmem
 ```
 
+## Coverage Policy
+
+Production packages must keep at least `90%` statement coverage.
+
+The enforced package set is checked by:
+
+```bash
+go run ./tools/checkcoverage
+```
+
+Examples and integration-only packages are not part of this threshold.
+
 ## Pull Requests
 
 - Describe the problem and the chosen approach.
 - Mention any API, config, persistence, or benchmark impact.
 - Keep unrelated refactors out of the same PR.
-

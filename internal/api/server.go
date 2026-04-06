@@ -16,6 +16,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+var (
+	listenAndServeFunc = func(server *http.Server) error { return server.ListenAndServe() }
+	logFatalfAPI       = log.Fatalf
+	logPrintfAPI       = log.Printf
+)
+
 type Server struct {
 	router       *mux.Router
 	port         string
@@ -299,15 +305,19 @@ func (s *Server) SearchVectorsBatchHandler(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) Start() {
-	log.Printf("Starting server on port %s", s.port)
-	server := &http.Server{
+	logPrintfAPI("Starting server on port %s", s.port)
+	server := s.httpServer()
+	if err := listenAndServeFunc(server); err != nil {
+		logFatalfAPI("Could not start server: %s", err)
+	}
+}
+
+func (s *Server) httpServer() *http.Server {
+	return &http.Server{
 		Addr:         s.port,
 		Handler:      s.router,
 		ReadTimeout:  s.readTimeout,
 		WriteTimeout: s.writeTimeout,
-	}
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("Could not start server: %s", err)
 	}
 }
 

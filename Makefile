@@ -1,6 +1,6 @@
 APP_NAME=lumenvec
 
-.PHONY: test vet build run bench tidy docker-build compose-up compose-down
+.PHONY: test vet build run bench tidy coverage docker-build compose-up compose-down
 
 test:
 	go test ./...
@@ -20,6 +20,9 @@ run:
 bench:
 	go test ./internal/core -bench . -benchmem
 
+coverage:
+	go run ./tools/checkcoverage
+
 docker-build:
 	docker build -t $(APP_NAME):latest .
 
@@ -28,4 +31,3 @@ compose-up:
 
 compose-down:
 	docker compose down
-

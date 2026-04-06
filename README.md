@@ -351,6 +351,7 @@ Run checks:
 ```bash
 go test ./...
 go vet ./...
+go run ./tools/checkcoverage
 ```
 
 Core benchmark:
@@ -365,7 +366,12 @@ make vet
 make build
 make run
 make bench
+make coverage
 ```
+
+Coverage policy:
+- production packages must remain at or above `90%` statement coverage
+- the enforced package set excludes `examples` and integration-only packages
 
 ## Project Structure
 

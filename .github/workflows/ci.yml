@@ -37,6 +37,9 @@ jobs:
       - name: Run vet
         run: go vet ./...
 
+      - name: Enforce coverage threshold
+        run: go run ./tools/checkcoverage
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
