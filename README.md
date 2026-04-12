@@ -469,17 +469,20 @@ Release packaging:
 - PowerShell: `powershell -ExecutionPolicy Bypass -File scripts/package-release.ps1`
 - Makefile: `make release-assets`
 - Output: transport-specific archives under `dist/release`, one `http` and one `grpc` package per supported OS
-- merges into `main` trigger the release workflow, which computes the next patch version from the latest tag, creates the new tag, and uploads the packaged assets automatically
+- bundles include `CHANGELOG.md` instead of static release-note snapshots
+- merges into `main` trigger the release workflow, which computes the next patch version from the latest tag, creates the new tag, updates the changelog through the promotion flow, and uploads the packaged assets automatically
+- release bump policy is label-driven on the PR to `main`: default `patch`, `release:minor` for minor releases, and `release:major` for major releases
 
 ## Release
 
 Recommended minimum release flow:
 1. run `go test ./...`
 2. open or update a `feature/*` branch and let CI promote it to a draft PR against `dev`
-3. merge validated changes into `dev`, then review the automated draft PR from `dev` to `main`
+3. merge validated changes into `dev`, then review the automated draft PR from `release/dev-to-main-vX.Y.Z` to `main`
 4. merge into `main` to trigger the GitHub release workflow
-5. let the workflow compute the next patch version and generate release notes from the commits since the previous tag
-6. publish the image to your target registry if you also distribute containers
+5. let the workflow compute the next patch version, update `CHANGELOG.md`, and generate release notes from the commits since the previous tag
+6. if needed, relabel the release PR with `release:minor` or `release:major` before merging
+7. publish the image to your target registry if you also distribute containers
 
 Docker Hub example:
 ```bash
@@ -490,7 +493,8 @@ docker push brunomarques007/lumenvec:latest
 Publication checklist:
 1. review the final public Docker image name
 2. confirm `LICENSE` matches the intended project license
-3. confirm the commit history between releases is ready to be turned into automated release notes
+3. confirm the commit history between releases is ready to be turned into automated release notes and changelog entries
+4. confirm the `main` release PR has the correct bump label: `release:patch`, `release:minor`, or `release:major`
 
 ## Delivery Pipeline
 
@@ -504,8 +508,9 @@ Workflow behavior:
 - pull requests targeting `dev` and `main` also run `.github/workflows/ci.yml`
 - successful CI runs on `feature/*` open or update a draft PR to `dev`
 - pushes to `dev` run `.github/workflows/release.yml`, which computes the next patch version from the latest tag, generates release notes from commit history, and builds the release bundles
-- successful runs of `.github/workflows/release.yml` on `dev` open or update a draft PR from `dev` to `main`
-- pushes to `main` run `.github/workflows/publish-release.yml`, which computes the next patch version, creates the git tag, and publishes the GitHub release with bundles rebuilt from `main`
+- successful runs of `.github/workflows/release.yml` on `dev` create or update a promotion branch `release/dev-to-main-vX.Y.Z`, update `CHANGELOG.md` there, and open a draft PR to `main`
+- the PR to `main` receives `release:patch` by default; switch it to `release:minor` or `release:major` when appropriate before merging
+- pushes to `main` run `.github/workflows/publish-release.yml`, which reads the merged PR labels, computes the final semantic version, creates the git tag, and publishes the GitHub release with bundles rebuilt from `main`
 - release asset names follow `lumenvec-vX.Y.Z-<os>-<arch>-<transport>.<ext>`
 
 Recommended repository settings:
@@ -594,7 +599,7 @@ Current architectural direction:
 ## Support Files
 
 - `CONTRIBUTING.md`: contribution flow and pre-PR checks
-- `CHANGELOG.md`: summary of notable changes
+- `CHANGELOG.md`: release history updated automatically by the promotion flow
 - `SECURITY.md`: lightweight disclosure and hardening guidance
 - `docs/roadmap.md`: execution backlog for cache, ANN refactor, and gRPC delivery
 - `docs/observability.md`: Prometheus queries, dashboard guidance, and ANN alerting notes
