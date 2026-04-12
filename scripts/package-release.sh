@@ -26,7 +26,8 @@ build_bundle() {
   local transport="$1"
   local config_file="$2"
   local bin_name="lumenvec"
-  local bundle_dir="$DIST_DIR/lumenvec_${VERSION#v}_${GOOS_TARGET}_${GOARCH_TARGET}_${transport}"
+  local bundle_name="lumenvec-${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}-${transport}"
+  local bundle_dir="$DIST_DIR/$bundle_name"
 
   if [[ "$GOOS_TARGET" == "windows" ]]; then
     bin_name="lumenvec.exe"
@@ -42,18 +43,26 @@ build_bundle() {
   cp README.md "$bundle_dir/README.md"
   cp LICENSE "$bundle_dir/LICENSE"
   cp RELEASE.md "$bundle_dir/RELEASE.md"
+  cat > "$bundle_dir/BUILD_INFO.txt" <<EOF
+LumenVec release bundle
+Version: $VERSION
+Platform: $GOOS_TARGET/$GOARCH_TARGET
+Transport: $transport
+Binary: $bin_name
+Config file: config.yaml
+EOF
 
   if [[ "$GOOS_TARGET" == "windows" ]]; then
     if command -v zip >/dev/null 2>&1; then
-      (cd "$DIST_DIR" && zip -qr "$(basename "$bundle_dir").zip" "$(basename "$bundle_dir")")
+      (cd "$DIST_DIR" && zip -qr "${bundle_name}.zip" "$bundle_name")
     elif command -v tar >/dev/null 2>&1; then
-      (cd "$DIST_DIR" && tar -a -cf "$(basename "$bundle_dir").zip" "$(basename "$bundle_dir")")
+      (cd "$DIST_DIR" && tar -a -cf "${bundle_name}.zip" "$bundle_name")
     else
       echo "neither zip nor tar is available to package Windows assets" >&2
       exit 1
     fi
   else
-    tar -C "$DIST_DIR" -czf "${bundle_dir}.tar.gz" "$(basename "$bundle_dir")"
+    tar -C "$DIST_DIR" -czf "${bundle_name}.tar.gz" "$bundle_name"
   fi
 }
 

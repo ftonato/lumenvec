@@ -1,0 +1,65 @@
+name: Promote Dev To Main
+
+on:
+  push:
+    branches: ["dev"]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  open-main-pr:
+    name: Open PR To Main
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create or update PR to main
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const head = "dev";
+            const base = "main";
+
+            const { owner, repo } = context.repo;
+            const prTitle = `Release ${head} to ${base}`;
+            const prBody = [
+              "## Automated release promotion",
+              "",
+              `Source branch: \`${head}\``,
+              `Target branch: \`${base}\``,
+              "",
+              "This draft PR was opened automatically after new changes landed on `dev`."
+            ].join("\n");
+
+            const { data: existing } = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: "open",
+              head: `${owner}:${head}`,
+              base
+            });
+
+            if (existing.length > 0) {
+              core.info(`PR already exists: #${existing[0].number}`);
+              await github.rest.pulls.update({
+                owner,
+                repo,
+                pull_number: existing[0].number,
+                title: prTitle,
+                body: prBody,
+                state: "open"
+              });
+              return;
+            }
+
+            await github.rest.pulls.create({
+              owner,
+              repo,
+              head,
+              base,
+              title: prTitle,
+              body: prBody,
+              draft: true
+            });

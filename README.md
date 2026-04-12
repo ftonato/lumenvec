@@ -468,18 +468,18 @@ Release packaging:
 - Bash: `bash scripts/package-release.sh`
 - PowerShell: `powershell -ExecutionPolicy Bypass -File scripts/package-release.ps1`
 - Makefile: `make release-assets`
-- Output: transport-specific archives under `dist/release`
-- GitHub tags matching `v*` trigger the release workflow and upload the packaged assets automatically
+- Output: transport-specific archives under `dist/release`, one `http` and one `grpc` package per supported OS
+- merges into `main` trigger the release workflow, which reads `VERSION`, creates the tag, and uploads the packaged assets automatically
 
 ## Release
 
 Recommended minimum release flow:
 1. run `go test ./...`
-2. build release bundles with `make release-assets`
-3. build the image with `docker build -t lumenvec:latest .`
-4. test locally with `docker compose up --build`
-5. push tag `vX.Y.Z` to trigger the GitHub release workflow
-6. publish the image to your target registry
+2. open or update a `feature/*` branch and let CI promote it to a draft PR against `dev`
+3. merge validated changes into `dev`, then review the automated draft PR from `dev` to `main`
+4. update `VERSION` and the matching `RELEASE.md` section before merging to `main`
+5. merge into `main` to trigger the GitHub release workflow
+6. publish the image to your target registry if you also distribute containers
 
 Docker Hub example:
 ```bash
@@ -490,7 +490,27 @@ docker push brunomarques007/lumenvec:latest
 Publication checklist:
 1. review the final public Docker image name
 2. confirm `LICENSE` matches the intended project license
-3. tag the release as `v0.1.1`
+3. update `VERSION` and add the matching `RELEASE.md` entry before merging to `main`
+
+## Delivery Pipeline
+
+Branch roles:
+- `feature/*`: implementation branches; every push runs CI
+- `dev`: integration branch promoted automatically from successful feature branches
+- `main`: release branch; merges from `dev` publish the GitHub release
+
+Workflow behavior:
+- pushes to `feature/*`, `bugfix/*`, `hotfix/*`, `dev`, and `main` run `.github/workflows/ci.yml`
+- successful CI runs on `feature/*` open or update a draft PR to `dev`
+- pushes to `dev` open or update a draft PR from `dev` to `main`
+- pushes to `main` run `.github/workflows/release.yml`, which reads `VERSION`, validates a matching section in `RELEASE.md`, creates the git tag, builds release assets, and publishes the GitHub release
+- release asset names follow `lumenvec-vX.Y.Z-<os>-<arch>-<transport>.<ext>`
+
+Recommended repository settings:
+- create the `dev` branch before enabling the automation
+- protect `dev` and `main` with required status checks from `CI`
+- block direct pushes to `main`
+- require review before merging the automated promotion PRs
 
 ## Development
 

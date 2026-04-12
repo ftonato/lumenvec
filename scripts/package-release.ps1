@@ -30,8 +30,8 @@ function Build-Bundle {
         [string]$ConfigFile
     )
 
-    $versionTag = $Version.TrimStart("v")
-    $bundleDir = Join-Path $DistDir "lumenvec_${versionTag}_${Goos}_${Goarch}_${Transport}"
+    $bundleName = "lumenvec-$Version-$Goos-$Goarch-$Transport"
+    $bundleDir = Join-Path $DistDir $bundleName
     if (Test-Path $bundleDir) {
         Remove-Item -Recurse -Force $bundleDir
     }
@@ -52,8 +52,16 @@ function Build-Bundle {
     Copy-Item README.md (Join-Path $bundleDir "README.md")
     Copy-Item LICENSE (Join-Path $bundleDir "LICENSE")
     Copy-Item RELEASE.md (Join-Path $bundleDir "RELEASE.md")
+    @(
+        "LumenVec release bundle"
+        "Version: $Version"
+        "Platform: $Goos/$Goarch"
+        "Transport: $Transport"
+        "Binary: $binaryName"
+        "Config file: config.yaml"
+    ) | Set-Content (Join-Path $bundleDir "BUILD_INFO.txt")
 
-    Compress-Archive -Path (Join-Path $bundleDir "*") -DestinationPath "${bundleDir}.zip" -Force
+    Compress-Archive -Path $bundleDir -DestinationPath (Join-Path $DistDir "$bundleName.zip") -Force
 }
 
 Build-Bundle -Transport "http" -ConfigFile "configs/config.yaml"
