@@ -78,6 +78,7 @@ type ServiceDeps struct {
 type Service struct {
 	index             VectorIndex
 	annIndex          *ann.AnnIndex
+	annMu             sync.RWMutex
 	maxVectorDim      int
 	maxK              int
 	snapshotPath      string
@@ -235,7 +236,7 @@ func (s *Service) AddVectors(vectors []index.Vector) error {
 			return err
 		}
 		internalID := s.idResolver.Assign(vec.ID)
-		_ = s.annIndex.AddVector(internalID, vec.Values)
+		s.addANNVector(internalID, vec.Values)
 		addedIDs = append(addedIDs, vec.ID)
 	}
 
@@ -392,7 +393,8 @@ func (s *Service) searchExact(values []float64, k int) []SearchResult {
 
 func (s *Service) searchANN(values []float64, k int) ([]SearchResult, bool) {
 	s.stats.annSearchesTotal.Add(1)
-	ids, err := s.annIndex.Search(values, k)
+	annIndex := s.currentANNIndex()
+	ids, err := annIndex.Search(values, k)
 	if err != nil {
 		s.stats.annSearchErrorsTotal.Add(1)
 		return nil, false
@@ -617,18 +619,21 @@ func (s *Service) loadSnapshot() error {
 			return err
 		}
 		internalID := s.idResolver.Assign(id)
-		_ = s.annIndex.AddVector(internalID, values)
+		s.addANNVector(internalID, values)
 	}
 	return nil
 }
 
 func (s *Service) rebuildANNLocked() {
 	s.ensureRuntimeDeps()
-	s.annIndex = ann.NewAnnIndexWithOptions(s.annOptions)
+	nextIndex := ann.NewAnnIndexWithOptions(s.annOptions)
 	for _, vec := range s.index.ListVectors() {
 		internalID := s.idResolver.Assign(vec.ID)
-		_ = s.annIndex.AddVector(internalID, vec.Values)
+		_ = nextIndex.AddVector(internalID, vec.Values)
 	}
+	s.annMu.Lock()
+	s.annIndex = nextIndex
+	s.annMu.Unlock()
 }
 
 func (s *Service) loadVectorStoreState() error {
@@ -641,7 +646,7 @@ func (s *Service) loadVectorStoreState() error {
 			return err
 		}
 		internalID := s.idResolver.Assign(vec.ID)
-		if err := s.annIndex.AddVector(internalID, vec.Values); err != nil {
+		if err := s.addANNVector(internalID, vec.Values); err != nil {
 			continue
 		}
 	}
@@ -699,7 +704,11 @@ func (s *Service) ensureRuntimeDeps() {
 		s.vectorStore = newMemoryVectorStore()
 	}
 	if s.annIndex == nil {
-		s.annIndex = ann.NewAnnIndexWithOptions(s.annOptions)
+		s.annMu.Lock()
+		if s.annIndex == nil {
+			s.annIndex = ann.NewAnnIndexWithOptions(s.annOptions)
+		}
+		s.annMu.Unlock()
 	}
 	if s.idResolver == nil {
 		s.idResolver = newMemoryIDResolver()
@@ -707,6 +716,26 @@ func (s *Service) ensureRuntimeDeps() {
 	if s.persistence == nil {
 		s.persistence = newSnapshotWALBackend(s.snapshotPath, s.walPath)
 	}
+}
+
+func (s *Service) currentANNIndex() *ann.AnnIndex {
+	s.annMu.RLock()
+	idx := s.annIndex
+	s.annMu.RUnlock()
+	if idx != nil {
+		return idx
+	}
+
+	s.annMu.Lock()
+	defer s.annMu.Unlock()
+	if s.annIndex == nil {
+		s.annIndex = ann.NewAnnIndexWithOptions(s.annOptions)
+	}
+	return s.annIndex
+}
+
+func (s *Service) addANNVector(internalID int, values []float64) error {
+	return s.currentANNIndex().AddVector(internalID, values)
 }
 
 func (s *Service) persistenceBackend() PersistenceBackend {
