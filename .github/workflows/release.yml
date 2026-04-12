@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  push:
+    branches: ["dev"]
+
+permissions:
+  contents: read
+
+jobs:
+  prepare-release:
+    name: Prepare Release Metadata
+    runs-on: ubuntu-latest
+
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          version="$(tr -d '\r\n' < VERSION)"
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION must match vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure tag does not already exist
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.value }}"
+          if git rev-parse "$version" >/dev/null 2>&1; then
+            echo "Tag $version already exists" >&2
+            exit 1
+          fi
+
+  build-assets:
+    name: Build Release Assets
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: amd64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build transport bundles
+        shell: bash
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.version }}" GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" DIST_DIR="dist/release" bash scripts/package-release.sh
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/release/*
+
+  validate-release:
+    name: Validate Release Notes
+    runs-on: ubuntu-latest
+    needs: [prepare-release, build-assets]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download bundled assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/release
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Extract release notes for current tag
+        shell: bash
+        run: |
+          tag="${{ needs.prepare-release.outputs.version }}"
+          awk -v tag="$tag" '
+            $0 == "## " tag { printing=1; next }
+            printing && /^## / { exit }
+            printing { print }
+          ' RELEASE.md > dist/release/release-notes.md
+
+          if [[ ! -s dist/release/release-notes.md ]]; then
+            echo "Release notes section for $tag not found in RELEASE.md" >&2
+            exit 1
+          fi
+
+      - name: Upload merged release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundles-${{ needs.prepare-release.outputs.version }}
+          path: dist/release/*

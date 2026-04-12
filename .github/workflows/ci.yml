@@ -2,9 +2,18 @@ name: CI
 
 on:
   push:
-    branches: ["main", "master"]
+    branches:
+      - "main"
+      - "master"
+      - "dev"
+      - "feature/**"
+      - "bugfix/**"
+      - "hotfix/**"
   pull_request:
-    branches: ["main", "master"]
+    branches:
+      - "main"
+      - "master"
+      - "dev"
 
 permissions:
   contents: read
@@ -34,6 +43,9 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+      - name: Run race tests on critical packages
+        run: go test -race ./internal/core ./internal/api ./pkg/client
+
       - name: Run vet
         run: go vet ./...
 
@@ -41,7 +53,7 @@ jobs:
         run: go run ./tools/checkcoverage
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: v1.60.3
+          version: v2.11.4
           args: --timeout=5m

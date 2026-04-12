@@ -1,4 +1,5 @@
 server:
+  protocol: "http"
   port: 19190
   read_timeout: 10s
   write_timeout: 10s
@@ -9,6 +10,12 @@ database:
   snapshot_path: "./data/snapshot.json"
   wal_path: "./data/wal.log"
   snapshot_every: 25
+  vector_store: "memory"
+  vector_path: "./data/vectors"
+  cache_enabled: false
+  cache_max_bytes: 8388608
+  cache_max_items: 1024
+  cache_ttl: "15m"
 
 limits:
   max_body_bytes: 1048576
@@ -17,6 +24,15 @@ limits:
 
 search:
   mode: "exact"
+  ann_profile: "balanced"
+  ann_m: 16
+  ann_ef_construction: 64
+  ann_ef_search: 64
+  ann_eval_sample_rate: 0
+
+grpc:
+  enabled: false
+  port: 19191
 
 logging:
   level: "info"

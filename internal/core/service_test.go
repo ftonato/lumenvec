@@ -2,14 +2,136 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"lumenvec/internal/index"
 	"lumenvec/internal/index/ann"
 )
+
+type stubPersistence struct {
+	saveSnapshotFn func([]index.Vector) error
+	loadSnapshotFn func() (map[string][]float64, error)
+	appendWALFn    func(walOp) error
+	replayWALFn    func(func(walOp) error) error
+	truncateWALFn  func() error
+}
+
+func (s *stubPersistence) SaveSnapshot(vectors []index.Vector) error {
+	if s.saveSnapshotFn != nil {
+		return s.saveSnapshotFn(vectors)
+	}
+	return nil
+}
+
+type stubVectorStore struct {
+	upsertFn func(index.Vector) error
+	getFn    func(string) (index.Vector, error)
+	deleteFn func(string) error
+	listFn   func() []index.Vector
+}
+
+func (s *stubVectorStore) UpsertVector(vec index.Vector) error {
+	if s.upsertFn != nil {
+		return s.upsertFn(vec)
+	}
+	return nil
+}
+
+func (s *stubVectorStore) GetVector(id string) (index.Vector, error) {
+	if s.getFn != nil {
+		return s.getFn(id)
+	}
+	return index.Vector{}, index.ErrVectorNotFound
+}
+
+func (s *stubVectorStore) DeleteVector(id string) error {
+	if s.deleteFn != nil {
+		return s.deleteFn(id)
+	}
+	return nil
+}
+
+func (s *stubVectorStore) ListVectors() []index.Vector {
+	if s.listFn != nil {
+		return s.listFn()
+	}
+	return nil
+}
+
+type stubIndex struct {
+	addFn    func(index.Vector) error
+	getFn    func(string) (index.Vector, error)
+	deleteFn func(string) error
+	listFn   func() []index.Vector
+	rangeFn  func(func(index.Vector) bool)
+}
+
+func (s *stubIndex) AddVector(vec index.Vector) error {
+	if s.addFn != nil {
+		return s.addFn(vec)
+	}
+	return nil
+}
+
+func (s *stubIndex) SearchVector(id string) (index.Vector, error) {
+	if s.getFn != nil {
+		return s.getFn(id)
+	}
+	return index.Vector{}, index.ErrVectorNotFound
+}
+
+func (s *stubIndex) DeleteVector(id string) error {
+	if s.deleteFn != nil {
+		return s.deleteFn(id)
+	}
+	return nil
+}
+
+func (s *stubIndex) ListVectors() []index.Vector {
+	if s.listFn != nil {
+		return s.listFn()
+	}
+	return nil
+}
+
+func (s *stubIndex) RangeVectors(fn func(index.Vector) bool) {
+	if s.rangeFn != nil {
+		s.rangeFn(fn)
+	}
+}
+
+func (s *stubPersistence) LoadSnapshot() (map[string][]float64, error) {
+	if s.loadSnapshotFn != nil {
+		return s.loadSnapshotFn()
+	}
+	return nil, nil
+}
+
+func (s *stubPersistence) AppendWAL(op walOp) error {
+	if s.appendWALFn != nil {
+		return s.appendWALFn(op)
+	}
+	return nil
+}
+
+func (s *stubPersistence) ReplayWAL(apply func(walOp) error) error {
+	if s.replayWALFn != nil {
+		return s.replayWALFn(apply)
+	}
+	return nil
+}
+
+func (s *stubPersistence) TruncateWAL() error {
+	if s.truncateWALFn != nil {
+		return s.truncateWALFn()
+	}
+	return nil
+}
 
 func newCoreService(t *testing.T, mode string) *Service {
 	t.Helper()
@@ -164,8 +286,12 @@ func TestServicePersistenceHelpers(t *testing.T) {
 	if err := svc.replayWAL(); err != nil {
 		t.Fatalf("replayWAL() error = %v", err)
 	}
-	if hashID("a") == 0 {
-		t.Fatal("expected non-zero hash")
+	internalID := svc.idResolver.Assign("a")
+	if internalID == 0 {
+		t.Fatal("expected non-zero internal ID")
+	}
+	if got, ok := svc.idResolver.Lookup(internalID); !ok || got != "a" {
+		t.Fatal("expected internal ID lookup to round-trip")
 	}
 }
 
@@ -216,6 +342,9 @@ func TestServiceJSONFailurePathsAndFallback(t *testing.T) {
 	svc := newCoreService(t, "exact")
 	if err := svc.index.AddVector(index.Vector{ID: "bad", Values: []float64{math.NaN()}}); err != nil {
 		t.Fatalf("index.AddVector() error = %v", err)
+	}
+	if err := svc.vectorStore.UpsertVector(index.Vector{ID: "bad", Values: []float64{math.NaN()}}); err != nil {
+		t.Fatalf("vectorStore.UpsertVector() error = %v", err)
 	}
 	if err := svc.saveSnapshot(); err == nil {
 		t.Fatal("expected saveSnapshot error")
@@ -343,6 +472,97 @@ func TestServiceSearchANNBranches(t *testing.T) {
 	}
 }
 
+func TestServiceStatsTrackANNHitAndFallback(t *testing.T) {
+	svc := newCoreService(t, "ann")
+	if err := svc.AddVector("a", []float64{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Search([]float64{1, 2, 3}, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	svc.annIndex = ann.NewAnnIndex()
+	if _, err := svc.Search([]float64{1, 2, 3}, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	stats := svc.Stats()
+	if stats.SearchRequestsTotal != 2 {
+		t.Fatalf("expected 2 search requests, got %d", stats.SearchRequestsTotal)
+	}
+	if stats.ANNSearchesTotal != 2 {
+		t.Fatalf("expected 2 ANN searches, got %d", stats.ANNSearchesTotal)
+	}
+	if stats.ANNSearchHitsTotal != 1 {
+		t.Fatalf("expected 1 ANN hit, got %d", stats.ANNSearchHitsTotal)
+	}
+	if stats.ANNSearchFallbacks != 1 {
+		t.Fatalf("expected 1 ANN fallback, got %d", stats.ANNSearchFallbacks)
+	}
+	if stats.ExactSearchesTotal != 1 {
+		t.Fatalf("expected 1 exact search, got %d", stats.ExactSearchesTotal)
+	}
+	if stats.ANNCandidatesReturned == 0 {
+		t.Fatal("expected candidate accounting for ANN hit")
+	}
+}
+
+func TestServiceStatsTrackANNError(t *testing.T) {
+	svc := newCoreService(t, "ann")
+	if err := svc.AddVector("a", []float64{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := svc.searchANN([]float64{1, 2}, 1); ok {
+		t.Fatal("expected ANN error path to return miss")
+	}
+
+	stats := svc.Stats()
+	if stats.ANNSearchErrorsTotal != 1 {
+		t.Fatalf("expected 1 ANN error, got %d", stats.ANNSearchErrorsTotal)
+	}
+	if stats.ANNSearchesTotal != 1 {
+		t.Fatalf("expected 1 ANN search, got %d", stats.ANNSearchesTotal)
+	}
+}
+
+func TestServiceStatsTrackANNEvaluationSample(t *testing.T) {
+	svc := NewService(ServiceOptions{
+		MaxVectorDim:      8,
+		MaxK:              5,
+		SnapshotPath:      filepath.Join(t.TempDir(), "snapshot.json"),
+		WALPath:           filepath.Join(t.TempDir(), "wal.log"),
+		SnapshotEvery:     2,
+		SearchMode:        "ann",
+		ANNEvalSampleRate: 100,
+	})
+	if err := svc.AddVectors([]index.Vector{
+		{ID: "a", Values: []float64{1, 2, 3}},
+		{ID: "b", Values: []float64{1, 2, 4}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Search([]float64{1, 2, 3.1}, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	stats := svc.Stats()
+	if stats.ANNEvalSamplesTotal != 1 {
+		t.Fatalf("expected 1 ann eval sample, got %d", stats.ANNEvalSamplesTotal)
+	}
+	if stats.ANNEvalTop1Matches != 1 {
+		t.Fatalf("expected top1 match to be tracked, got %d", stats.ANNEvalTop1Matches)
+	}
+	if stats.ANNEvalComparedResults != 1 {
+		t.Fatalf("expected compared results to be tracked, got %d", stats.ANNEvalComparedResults)
+	}
+	if stats.ANNEvalOverlapResults != 1 {
+		t.Fatalf("expected overlap results to be tracked, got %d", stats.ANNEvalOverlapResults)
+	}
+}
+
 func TestServiceRestoreStateFailureBranches(t *testing.T) {
 	base := t.TempDir()
 	svc := &Service{
@@ -403,5 +623,607 @@ func TestServiceSearchBatchInvalidQuery(t *testing.T) {
 	svc := newCoreService(t, "exact")
 	if _, err := svc.SearchBatch([]BatchSearchQuery{{ID: "q", Values: nil, K: 1}}); !errors.Is(err, ErrInvalidValues) {
 		t.Fatalf("expected ErrInvalidValues, got %v", err)
+	}
+}
+
+func TestNewServiceWithDeps(t *testing.T) {
+	idx := index.NewIndex()
+	store := &stubVectorStore{}
+	annIdx := ann.NewAnnIndex()
+	resolver := newMemoryIDResolver()
+	persistence := &stubPersistence{}
+
+	svc := NewServiceWithDeps(ServiceOptions{
+		MaxVectorDim:  8,
+		MaxK:          5,
+		SnapshotPath:  filepath.Join(t.TempDir(), "snapshot.json"),
+		WALPath:       filepath.Join(t.TempDir(), "wal.log"),
+		SnapshotEvery: 2,
+		SearchMode:    "exact",
+	}, ServiceDeps{
+		Index:       idx,
+		VectorStore: store,
+		ANNIndex:    annIdx,
+		IDResolver:  resolver,
+		Persistence: persistence,
+	})
+
+	if svc.index != idx {
+		t.Fatal("expected injected index to be used")
+	}
+	if svc.vectorStore != store {
+		t.Fatal("expected injected vector store to be used")
+	}
+	if svc.idResolver != resolver {
+		t.Fatal("expected injected ID resolver to be used")
+	}
+	if svc.persistence != persistence {
+		t.Fatal("expected injected persistence to be used")
+	}
+	if annIdx == nil || svc.annIndex == nil {
+		t.Fatal("expected ANN index instances to be available")
+	}
+}
+
+func TestServiceGetVectorUsesVectorStore(t *testing.T) {
+	svc := NewServiceWithDeps(ServiceOptions{
+		MaxVectorDim:  8,
+		MaxK:          5,
+		SnapshotPath:  filepath.Join(t.TempDir(), "snapshot.json"),
+		WALPath:       filepath.Join(t.TempDir(), "wal.log"),
+		SnapshotEvery: 2,
+		SearchMode:    "exact",
+	}, ServiceDeps{
+		Index: index.NewIndex(),
+		VectorStore: &stubVectorStore{
+			getFn: func(id string) (index.Vector, error) {
+				return index.Vector{ID: id, Values: []float64{9, 8, 7}}, nil
+			},
+		},
+		ANNIndex:    ann.NewAnnIndex(),
+		IDResolver:  newMemoryIDResolver(),
+		Persistence: &stubPersistence{},
+	})
+
+	vec, err := svc.GetVector("from-store")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vec.ID != "from-store" || len(vec.Values) != 3 || vec.Values[0] != 9 {
+		t.Fatal("expected vector to come from vector store")
+	}
+}
+
+func TestServiceSearchANNUsesVectorStoreForRescore(t *testing.T) {
+	resolver := newMemoryIDResolver()
+
+	svc := NewServiceWithDeps(ServiceOptions{
+		MaxVectorDim:  8,
+		MaxK:          5,
+		SnapshotPath:  filepath.Join(t.TempDir(), "snapshot.json"),
+		WALPath:       filepath.Join(t.TempDir(), "wal.log"),
+		SnapshotEvery: 2,
+		SearchMode:    "ann",
+	}, ServiceDeps{
+		Index: index.NewIndex(),
+		VectorStore: &stubVectorStore{
+			getFn: func(id string) (index.Vector, error) {
+				if id != "ann-store" {
+					t.Fatalf("unexpected vector store lookup %q", id)
+				}
+				return index.Vector{ID: id, Values: []float64{1, 2, 3}}, nil
+			},
+		},
+		ANNIndex:    ann.NewAnnIndex(),
+		IDResolver:  resolver,
+		Persistence: &stubPersistence{},
+	})
+	internalID := resolver.Assign("ann-store")
+	if err := svc.annIndex.AddVector(internalID, []float64{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+
+	results, ok := svc.searchANN([]float64{1, 2, 3}, 1)
+	if !ok {
+		t.Fatal("expected ANN search to succeed")
+	}
+	if len(results) != 1 || results[0].ID != "ann-store" {
+		t.Fatal("expected ANN rescore to use vector store payload")
+	}
+}
+
+func TestServiceWithDiskVectorStore(t *testing.T) {
+	base := t.TempDir()
+	svc := NewService(ServiceOptions{
+		MaxVectorDim:  8,
+		MaxK:          5,
+		SnapshotPath:  filepath.Join(base, "snapshot.json"),
+		WALPath:       filepath.Join(base, "wal.log"),
+		SnapshotEvery: 2,
+		SearchMode:    "ann",
+		VectorStore:   "disk",
+		VectorPath:    filepath.Join(base, "vectors"),
+	})
+	t.Cleanup(func() { _ = svc.Close() })
+
+	if err := svc.AddVector("disk-1", []float64{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	vec, err := svc.GetVector("disk-1")
+	if err != nil || vec.ID != "disk-1" {
+		t.Fatal("expected vector from disk-backed store")
+	}
+	results, err := svc.Search([]float64{1, 2, 3.1}, 1)
+	if err != nil || len(results) != 1 || results[0].ID != "disk-1" {
+		t.Fatal("expected search result from disk-backed store")
+	}
+}
+
+func TestServiceWithDiskVectorStoreRestoresWithoutSnapshotWAL(t *testing.T) {
+	base := t.TempDir()
+	vectorPath := filepath.Join(base, "vectors")
+	snapshotPath := filepath.Join(base, "snapshot.json")
+	walPath := filepath.Join(base, "wal.log")
+
+	svc := NewService(ServiceOptions{
+		MaxVectorDim:  8,
+		MaxK:          5,
+		SnapshotPath:  snapshotPath,
+		WALPath:       walPath,
+		SnapshotEvery: 1,
+		SearchMode:    "ann",
+		VectorStore:   "disk",
+		VectorPath:    vectorPath,
+	})
+	t.Cleanup(func() { _ = svc.Close() })
+	if err := svc.AddVector("disk-restore", []float64{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(snapshotPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no snapshot file, got %v", err)
+	}
+	if _, err := os.Stat(walPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no wal file, got %v", err)
+	}
+
+	restored := NewService(ServiceOptions{
+		MaxVectorDim:  8,
+		MaxK:          5,
+		SnapshotPath:  snapshotPath,
+		WALPath:       walPath,
+		SnapshotEvery: 1,
+		SearchMode:    "ann",
+		VectorStore:   "disk",
+		VectorPath:    vectorPath,
+	})
+	t.Cleanup(func() { _ = restored.Close() })
+	vec, err := restored.GetVector("disk-restore")
+	if err != nil || vec.ID != "disk-restore" {
+		t.Fatal("expected disk-backed vector after restart")
+	}
+	results, err := restored.Search([]float64{1, 2, 3.1}, 1)
+	if err != nil || len(results) != 1 || results[0].ID != "disk-restore" {
+		t.Fatal("expected ANN search result after disk-backed restore")
+	}
+}
+
+func TestServiceConcurrentReadWrite(t *testing.T) {
+	svc := newCoreService(t, "ann")
+	var wg sync.WaitGroup
+
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			id := fmt.Sprintf("vec-%d", n%6)
+			values := []float64{float64(n), float64(n + 1), float64(n + 2)}
+			_ = svc.AddVector(id, values)
+			_, _ = svc.GetVector(id)
+			_, _ = svc.Search(values, 1)
+		}(i)
+	}
+
+	wg.Wait()
+}
+
+func TestServiceStatsHelpersAndConfigNormalization(t *testing.T) {
+	base := t.TempDir()
+	svc := NewService(ServiceOptions{
+		MaxVectorDim:      8,
+		MaxK:              5,
+		SnapshotPath:      filepath.Join(base, "snapshot.json"),
+		WALPath:           filepath.Join(base, "wal.log"),
+		SnapshotEvery:     2,
+		SearchMode:        "ann",
+		ANNProfile:        "custom",
+		ANNEvalSampleRate: 150,
+		Cache: CacheOptions{
+			Enabled:  true,
+			MaxBytes: 1024,
+			MaxItems: 2,
+		},
+	})
+
+	if err := svc.AddVector("a", []float64{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.GetVector("a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.GetVector("a"); err != nil {
+		t.Fatal(err)
+	}
+
+	stats := svc.Stats()
+	if stats.ANNProfile != "custom" || stats.CacheHitsTotal == 0 {
+		t.Fatal("expected stats to expose profile and cache hits")
+	}
+	if normalizeANNProfile("fast") != "fast" || normalizeANNProfile("quality") != "quality" || normalizeANNProfile("x") != "balanced" {
+		t.Fatal("unexpected ANN profile normalization")
+	}
+	if clampPercent(-1) != 0 || clampPercent(101) != 100 || clampPercent(42) != 42 {
+		t.Fatal("unexpected clampPercent result")
+	}
+	if minInt(1, 2) != 1 || minInt(3, 2) != 2 {
+		t.Fatal("unexpected minInt result")
+	}
+	if svc.currentANNIndex() == nil {
+		t.Fatal("expected current ANN index")
+	}
+}
+
+func TestServicePersistentRestoreAndHelpers(t *testing.T) {
+	base := t.TempDir()
+	vectorPath := filepath.Join(base, "vectors")
+	svc := NewService(ServiceOptions{
+		MaxVectorDim:  8,
+		MaxK:          5,
+		SnapshotPath:  filepath.Join(base, "snapshot.json"),
+		WALPath:       filepath.Join(base, "wal.log"),
+		SnapshotEvery: 1,
+		SearchMode:    "ann",
+		VectorStore:   "disk",
+		VectorPath:    vectorPath,
+	})
+	t.Cleanup(func() { _ = svc.Close() })
+
+	if err := svc.AddVector("disk-1", []float64{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.restoreState(); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.saveSnapshot(); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.truncateWAL(); err != nil {
+		t.Fatal(err)
+	}
+	if backend := svc.persistenceBackend(); backend == nil {
+		t.Fatal("expected persistence backend")
+	}
+	if err := svc.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceCurrentANNIndexAndEnsureRuntimeDepsPaths(t *testing.T) {
+	svc := &Service{
+		maxVectorDim:  8,
+		maxK:          5,
+		snapshotPath:  filepath.Join(t.TempDir(), "snapshot.json"),
+		walPath:       filepath.Join(t.TempDir(), "wal.log"),
+		snapshotEvery: 1,
+	}
+
+	if svc.currentANNIndex() == nil {
+		t.Fatal("expected ANN index initialization")
+	}
+	svc.ensureRuntimeDeps()
+	if svc.index == nil || svc.vectorStore == nil || svc.idResolver == nil || svc.persistence == nil {
+		t.Fatal("expected runtime deps to be initialized")
+	}
+}
+
+func TestServiceLoadVectorStoreStateAndFactoryDefaults(t *testing.T) {
+	base := t.TempDir()
+	vectorPath := filepath.Join(base, "vectors")
+	store := newFileVectorStore(vectorPath)
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertVector(index.Vector{ID: "doc-1", Values: []float64{1, 2, 3}}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := &Service{
+		index:         index.NewIndex(),
+		maxVectorDim:  8,
+		maxK:          5,
+		vectorStore:   store,
+		idResolver:    newMemoryIDResolver(),
+		annOptions:    ann.Options{},
+		persistence:   &stubPersistence{},
+		snapshotPath:  filepath.Join(base, "snapshot.json"),
+		walPath:       filepath.Join(base, "wal.log"),
+		snapshotEvery: 1,
+	}
+	if err := svc.loadVectorStoreState(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.index.SearchVector("doc-1"); err != nil {
+		t.Fatal("expected vector store state to populate index")
+	}
+
+	memStore := newDefaultVectorStore("", "")
+	if memStore == nil {
+		t.Fatal("expected memory vector store default")
+	}
+}
+
+func TestServiceLoadVectorStoreStateBranchesAndPersistenceSwap(t *testing.T) {
+	base := t.TempDir()
+	svc := &Service{
+		index:        index.NewIndex(),
+		maxVectorDim: 3,
+		vectorStore: &stubVectorStore{
+			listFn: func() []index.Vector {
+				return []index.Vector{
+					{ID: "ok", Values: []float64{1, 2, 3}},
+					{ID: "skip-empty", Values: nil},
+					{ID: "skip-big", Values: []float64{1, 2, 3, 4}},
+				}
+			},
+		},
+		idResolver:    newMemoryIDResolver(),
+		persistence:   newSnapshotWALBackend(filepath.Join(base, "one.json"), filepath.Join(base, "one.log")),
+		snapshotPath:  filepath.Join(base, "two.json"),
+		walPath:       filepath.Join(base, "two.log"),
+		snapshotEvery: 1,
+	}
+	if err := svc.loadVectorStoreState(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.index.SearchVector("ok"); err != nil {
+		t.Fatal("expected ok vector to load")
+	}
+	if svc.persistenceBackend() == nil {
+		t.Fatal("expected swapped persistence backend")
+	}
+}
+
+func TestServiceLoadVectorStoreStateIndexErrorAndANNContinue(t *testing.T) {
+	base := t.TempDir()
+	svcIndexErr := &Service{
+		index: &stubIndex{
+			addFn: func(index.Vector) error { return errors.New("index add failed") },
+		},
+		maxVectorDim: 8,
+		vectorStore: &stubVectorStore{
+			listFn: func() []index.Vector { return []index.Vector{{ID: "a", Values: []float64{1, 2, 3}}} },
+		},
+		idResolver:    newMemoryIDResolver(),
+		persistence:   &stubPersistence{},
+		snapshotPath:  filepath.Join(base, "snapshot-a.json"),
+		walPath:       filepath.Join(base, "wal-a.log"),
+		snapshotEvery: 1,
+	}
+	if err := svcIndexErr.loadVectorStoreState(); err == nil {
+		t.Fatal("expected loadVectorStoreState index error")
+	}
+
+	badANN := ann.NewAnnIndex()
+	if err := badANN.AddVector(1, []float64{1, 2}); err != nil {
+		t.Fatal(err)
+	}
+	svcANNContinue := &Service{
+		index:        index.NewIndex(),
+		annIndex:     badANN,
+		maxVectorDim: 8,
+		vectorStore: &stubVectorStore{
+			listFn: func() []index.Vector {
+				return []index.Vector{
+					{ID: "a", Values: []float64{1, 2, 3}},
+					{ID: "b", Values: []float64{4, 5, 6}},
+				}
+			},
+		},
+		idResolver:    newMemoryIDResolver(),
+		persistence:   &stubPersistence{},
+		snapshotPath:  filepath.Join(base, "snapshot-b.json"),
+		walPath:       filepath.Join(base, "wal-b.log"),
+		snapshotEvery: 1,
+	}
+	if err := svcANNContinue.loadVectorStoreState(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svcANNContinue.index.SearchVector("a"); err != nil {
+		t.Fatal("expected vector indexed even when ann add continues")
+	}
+}
+
+func TestServiceCloseWithoutCloserAndPersistentRestoreError(t *testing.T) {
+	svc := &Service{vectorStore: newMemoryVectorStore()}
+	if err := svc.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	base := t.TempDir()
+	bad := &Service{
+		index:        index.NewIndex(),
+		annIndex:     ann.NewAnnIndex(),
+		maxVectorDim: 8,
+		maxK:         5,
+		vectorStore: &stubVectorStore{
+			listFn: func() []index.Vector {
+				return []index.Vector{{ID: "too-big", Values: []float64{1, 2, 3, 4, 5, 6, 7, 8, 9}}}
+			},
+		},
+		idResolver:    newMemoryIDResolver(),
+		persistence:   &stubPersistence{},
+		snapshotPath:  filepath.Join(base, "snapshot.json"),
+		walPath:       filepath.Join(base, "wal.log"),
+		snapshotEvery: 1,
+	}
+	if err := bad.restoreState(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServicePersistenceBackendAndFactoryBranches(t *testing.T) {
+	base := t.TempDir()
+	svc := &Service{
+		snapshotPath: filepath.Join(base, "snapshot.json"),
+		walPath:      filepath.Join(base, "wal.log"),
+	}
+	if backend := svc.persistenceBackend(); backend == nil {
+		t.Fatal("expected default backend when nil")
+	}
+
+	if diskDefault := newDefaultVectorStore("disk", ""); diskDefault == nil {
+		t.Fatal("expected disk default store")
+	}
+}
+
+func TestServiceAddVectorsErrorBranches(t *testing.T) {
+	base := t.TempDir()
+
+	svcUpsert := NewServiceWithDeps(ServiceOptions{
+		MaxVectorDim:  8,
+		MaxK:          5,
+		SnapshotPath:  filepath.Join(base, "snapshot-upsert.json"),
+		WALPath:       filepath.Join(base, "wal-upsert.log"),
+		SnapshotEvery: 2,
+		SearchMode:    "exact",
+	}, ServiceDeps{
+		Index: index.NewIndex(),
+		VectorStore: &stubVectorStore{
+			upsertFn: func(index.Vector) error { return errors.New("upsert failed") },
+		},
+		ANNIndex:    ann.NewAnnIndex(),
+		IDResolver:  newMemoryIDResolver(),
+		Persistence: &stubPersistence{},
+	})
+	if err := svcUpsert.AddVector("a", []float64{1, 2, 3}); err == nil {
+		t.Fatal("expected vector store upsert error")
+	}
+
+	svcIndex := NewServiceWithDeps(ServiceOptions{
+		MaxVectorDim:  8,
+		MaxK:          5,
+		SnapshotPath:  filepath.Join(base, "snapshot-index.json"),
+		WALPath:       filepath.Join(base, "wal-index.log"),
+		SnapshotEvery: 2,
+		SearchMode:    "exact",
+	}, ServiceDeps{
+		Index: &stubIndex{
+			addFn: func(index.Vector) error { return errors.New("index add failed") },
+		},
+		VectorStore: newMemoryVectorStore(),
+		ANNIndex:    ann.NewAnnIndex(),
+		IDResolver:  newMemoryIDResolver(),
+		Persistence: &stubPersistence{},
+	})
+	if err := svcIndex.AddVector("b", []float64{1, 2, 3}); err == nil {
+		t.Fatal("expected index add error")
+	}
+
+	svcWAL := NewServiceWithDeps(ServiceOptions{
+		MaxVectorDim:  8,
+		MaxK:          5,
+		SnapshotPath:  filepath.Join(base, "snapshot-wal.json"),
+		WALPath:       filepath.Join(base, "wal-wal.log"),
+		SnapshotEvery: 2,
+		SearchMode:    "exact",
+	}, ServiceDeps{
+		Index:       index.NewIndex(),
+		VectorStore: newMemoryVectorStore(),
+		ANNIndex:    ann.NewAnnIndex(),
+		IDResolver:  newMemoryIDResolver(),
+		Persistence: &stubPersistence{
+			appendWALFn: func(walOp) error { return errors.New("wal append failed") },
+		},
+	})
+	if err := svcWAL.AddVector("c", []float64{1, 2, 3}); err == nil {
+		t.Fatal("expected wal append error")
+	}
+}
+
+func TestServiceDeleteVectorErrorBranches(t *testing.T) {
+	base := t.TempDir()
+	svc := NewServiceWithDeps(ServiceOptions{
+		MaxVectorDim:  8,
+		MaxK:          5,
+		SnapshotPath:  filepath.Join(base, "snapshot.json"),
+		WALPath:       filepath.Join(base, "wal.log"),
+		SnapshotEvery: 2,
+		SearchMode:    "exact",
+	}, ServiceDeps{
+		Index: &stubIndex{
+			deleteFn: func(string) error { return errors.New("index delete failed") },
+		},
+		VectorStore: &stubVectorStore{
+			getFn: func(id string) (index.Vector, error) { return index.Vector{ID: id, Values: []float64{1, 2, 3}}, nil },
+		},
+		ANNIndex:    ann.NewAnnIndex(),
+		IDResolver:  newMemoryIDResolver(),
+		Persistence: &stubPersistence{},
+	})
+	if err := svc.DeleteVector("a"); err == nil {
+		t.Fatal("expected index delete error")
+	}
+
+	svcStoreDelete := NewServiceWithDeps(ServiceOptions{
+		MaxVectorDim:  8,
+		MaxK:          5,
+		SnapshotPath:  filepath.Join(base, "snapshot-store.json"),
+		WALPath:       filepath.Join(base, "wal-store.log"),
+		SnapshotEvery: 2,
+		SearchMode:    "exact",
+	}, ServiceDeps{
+		Index: index.NewIndex(),
+		VectorStore: &stubVectorStore{
+			getFn:    func(id string) (index.Vector, error) { return index.Vector{ID: id, Values: []float64{1, 2, 3}}, nil },
+			deleteFn: func(string) error { return errors.New("store delete failed") },
+		},
+		ANNIndex:    ann.NewAnnIndex(),
+		IDResolver:  newMemoryIDResolver(),
+		Persistence: &stubPersistence{},
+	})
+	_ = svcStoreDelete.index.AddVector(index.Vector{ID: "a", Values: []float64{1, 2, 3}})
+	if err := svcStoreDelete.DeleteVector("a"); err == nil {
+		t.Fatal("expected store delete error")
+	}
+}
+
+func TestServiceLoadSnapshotAndReplayWALErrorBranches(t *testing.T) {
+	base := t.TempDir()
+	svcSnapshot := &Service{
+		index:        index.NewIndex(),
+		vectorStore:  &stubVectorStore{upsertFn: func(index.Vector) error { return errors.New("snapshot upsert failed") }},
+		idResolver:   newMemoryIDResolver(),
+		persistence:  &stubPersistence{loadSnapshotFn: func() (map[string][]float64, error) { return map[string][]float64{"a": {1, 2, 3}}, nil }},
+		maxVectorDim: 8,
+		maxK:         5,
+		snapshotPath: filepath.Join(base, "snapshot.json"),
+		walPath:      filepath.Join(base, "wal.log"),
+	}
+	if err := svcSnapshot.loadSnapshot(); err == nil {
+		t.Fatal("expected snapshot upsert error")
+	}
+
+	svcReplay := &Service{
+		index: index.NewIndex(),
+		vectorStore: &stubVectorStore{
+			upsertFn: func(index.Vector) error { return errors.New("wal upsert failed") },
+		},
+		idResolver:   newMemoryIDResolver(),
+		persistence:  &stubPersistence{replayWALFn: func(apply func(walOp) error) error { return apply(walOp{Op: "upsert", ID: "a", Values: []float64{1, 2, 3}}) }},
+		maxVectorDim: 8,
+		maxK:         5,
+		snapshotPath: filepath.Join(base, "snapshot2.json"),
+		walPath:      filepath.Join(base, "wal2.log"),
+	}
+	if err := svcReplay.replayWAL(); err == nil {
+		t.Fatal("expected replay wal apply error")
 	}
 }
