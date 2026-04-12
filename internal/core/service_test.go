@@ -1114,8 +1114,9 @@ func TestSnapshotWALBackendUsesConfiguredPermissions(t *testing.T) {
 		t.Skip("permission bits are not reliable on Windows")
 	}
 	base := t.TempDir()
-	snapshotPath := filepath.Join(base, "snapshot.json")
-	walPath := filepath.Join(base, "wal.log")
+	storageDir := filepath.Join(base, "secure")
+	snapshotPath := filepath.Join(storageDir, "snapshot.json")
+	walPath := filepath.Join(storageDir, "wal.log")
 	backend := newSnapshotWALBackendWithSecurity(snapshotPath, walPath, StrictStorageSecurityOptions())
 
 	if err := backend.SaveSnapshot([]index.Vector{{ID: "a", Values: []float64{1, 2, 3}}}); err != nil {
@@ -1125,7 +1126,7 @@ func TestSnapshotWALBackendUsesConfiguredPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dirMode, err := storagePathMode(base)
+	dirMode, err := storagePathMode(storageDir)
 	if err != nil {
 		t.Fatal(err)
 	}
