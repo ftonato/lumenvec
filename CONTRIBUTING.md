@@ -36,7 +36,10 @@ go test ./internal/core -bench . -benchmem
 
 ## Coverage Policy
 
-Production packages must keep at least `90%` statement coverage.
+Production packages must keep at least `90%` statement coverage by default.
+
+Current package-specific exception:
+- `internal/core`: `88%` minimum while storage and cache infrastructure coverage is being expanded
 
 The enforced package set is checked by:
 

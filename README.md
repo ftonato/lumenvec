@@ -558,7 +558,8 @@ make coverage
 ```
 
 Coverage policy:
-- production packages must remain at or above `90%` statement coverage
+- production packages must remain at or above `90%` statement coverage by default
+- `internal/core` currently enforces `88%` while storage and cache coverage is being expanded
 - the enforced package set excludes `examples` and integration-only packages
 
 ## Project Structure

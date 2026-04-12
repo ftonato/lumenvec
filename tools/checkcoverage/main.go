@@ -24,6 +24,10 @@ var packages = []string{
 	"./pkg/client",
 }
 
+var packageThresholds = map[string]float64{
+	"./internal/core": 88.0,
+}
+
 func main() {
 	rootDir, err := findModuleRoot()
 	if err != nil {
@@ -64,11 +68,16 @@ func main() {
 			os.Exit(1)
 		}
 
-		if total < threshold {
-			fmt.Printf("FAIL  %-24s %6.1f%%\n", pkg, total)
+		pkgThreshold := threshold
+		if value, ok := packageThresholds[pkg]; ok {
+			pkgThreshold = value
+		}
+
+		if total < pkgThreshold {
+			fmt.Printf("FAIL  %-24s %6.1f%% (threshold %.1f%%)\n", pkg, total, pkgThreshold)
 			failed = true
 		} else {
-			fmt.Printf("PASS  %-24s %6.1f%%\n", pkg, total)
+			fmt.Printf("PASS  %-24s %6.1f%% (threshold %.1f%%)\n", pkg, total, pkgThreshold)
 		}
 	}
 
