@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	lumenvecpb "lumenvec/api/proto"
@@ -22,6 +23,15 @@ type testVectorService struct {
 
 func (s *testVectorService) Health(context.Context, *lumenvecpb.HealthRequest) (*lumenvecpb.HealthResponse, error) {
 	return &lumenvecpb.HealthResponse{Status: "ok"}, nil
+}
+
+func (s *testVectorService) ListVectors(context.Context, *lumenvecpb.ListVectorsRequest) (*lumenvecpb.ListVectorsResponse, error) {
+	vecs := s.service.ListVectors()
+	out := make([]*lumenvecpb.Vector, 0, len(vecs))
+	for _, vec := range vecs {
+		out = append(out, &lumenvecpb.Vector{Id: vec.ID, Values: vec.Values})
+	}
+	return &lumenvecpb.ListVectorsResponse{Vectors: out}, nil
 }
 
 func (s *testVectorService) AddVector(_ context.Context, req *lumenvecpb.AddVectorRequest) (*lumenvecpb.AddVectorResponse, error) {
@@ -129,6 +139,10 @@ func TestGRPCVectorClientLifecycle(t *testing.T) {
 	}
 	if err := client.AddVectorWithID("doc-1", []float64{1, 2, 3}); err != nil {
 		t.Fatal(err)
+	}
+	vecs, err := client.ListVectors()
+	if err != nil || len(vecs) != 1 || vecs[0].ID != "doc-1" || !reflect.DeepEqual(vecs[0].Values, []float64{1, 2, 3}) {
+		t.Fatal("expected grpc list vectors")
 	}
 	vec, err := client.GetVector("doc-1")
 	if err != nil || vec == nil || vec.ID != "doc-1" {
