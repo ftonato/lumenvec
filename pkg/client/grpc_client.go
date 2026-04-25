@@ -17,6 +17,8 @@ type GRPCVectorClient struct {
 	timeout time.Duration
 }
 
+const defaultGRPCListVectorsLimit = 1000
+
 func NewGRPCVectorClient(address string) (*GRPCVectorClient, error) {
 	return NewGRPCVectorClientWithDialer(address, nil)
 }
@@ -73,11 +75,37 @@ func (c *GRPCVectorClient) AddVectors(vectors []VectorPayload) error {
 }
 
 func (c *GRPCVectorClient) ListVectors() ([]VectorPayload, error) {
+	out := make([]VectorPayload, 0)
+	cursor := ""
+	for {
+		page, err := c.ListVectorsPage(ListVectorsOptions{
+			Limit:  defaultGRPCListVectorsLimit,
+			Cursor: cursor,
+		})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, page.Vectors...)
+		if page.NextCursor == "" {
+			return out, nil
+		}
+		if page.NextCursor == cursor {
+			return nil, fmt.Errorf("list vectors cursor did not advance")
+		}
+		cursor = page.NextCursor
+	}
+}
+
+func (c *GRPCVectorClient) ListVectorsPage(opts ListVectorsOptions) (ListVectorsPage, error) {
 	ctx, cancel := c.context()
 	defer cancel()
-	resp, err := c.client.ListVectors(ctx, &lumenvecpb.ListVectorsRequest{})
+	resp, err := c.client.ListVectors(ctx, &lumenvecpb.ListVectorsRequest{
+		Limit:   grpcListVectorsRequestLimit(opts.Limit),
+		Cursor:  opts.Cursor,
+		IdsOnly: opts.IDsOnly,
+	})
 	if err != nil {
-		return nil, err
+		return ListVectorsPage{}, err
 	}
 	out := make([]VectorPayload, 0, len(resp.GetVectors()))
 	for _, vec := range resp.GetVectors() {
@@ -89,7 +117,17 @@ func (c *GRPCVectorClient) ListVectors() ([]VectorPayload, error) {
 			Values: vec.GetValues(),
 		})
 	}
-	return out, nil
+	return ListVectorsPage{Vectors: out, NextCursor: resp.GetNextCursor()}, nil
+}
+
+func grpcListVectorsRequestLimit(limit int) int32 {
+	if limit < 0 {
+		return -1
+	}
+	if limit > defaultGRPCListVectorsLimit {
+		return defaultGRPCListVectorsLimit
+	}
+	return int32(limit)
 }
 
 func (c *GRPCVectorClient) GetVector(id string) (*VectorPayload, error) {
